@@ -6,6 +6,8 @@ import (
 	"log"
 	"os"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/google/gopacket"
 	"github.com/google/gopacket/layers"
@@ -95,6 +97,16 @@ func main() {
 		Info    string
 	}
 	packetCh := make(chan PacketRow, 100)
+
+	// Flow and protocol maps
+	type flowKey struct {
+		src, dst string
+	}
+	flowCounts := make(map[flowKey]uint64)
+	protoCounts := make(map[string]uint64)
+	var statsMu sync.Mutex
+	var totalPackets uint64
+
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
@@ -147,10 +159,50 @@ func main() {
 			if info == "" {
 				info = "-"
 			}
+
+			// Update flow and protocol counts
+			if srcIP != "" && dstIP != "" {
+				statsMu.Lock()
+				flowCounts[flowKey{srcIP, dstIP}]++
+				statsMu.Unlock()
+			}
+			if proto != "" {
+				statsMu.Lock()
+				protoCounts[proto]++
+				statsMu.Unlock()
+			}
+			atomic.AddUint64(&totalPackets, 1)
+
 			packetCh <- PacketRow{count, timestamp, srcIP, dstIP, srcPort, dstPort, proto, info}
 			count++
 		}
 		close(packetCh)
+	}()
+
+	// Live summary printer goroutine
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for range ticker.C {
+			statsMu.Lock()
+			fmt.Println("\n--- Live Flow Summary ---")
+			fmt.Printf("Total packets: %d\n", atomic.LoadUint64(&totalPackets))
+			fmt.Println("Top flows (srcIP -> dstIP):")
+			flowShown := 0
+			for k, v := range flowCounts {
+				if flowShown >= 10 {
+					break
+				}
+				fmt.Printf("%s -> %s: %d packets\n", k.src, k.dst, v)
+				flowShown++
+			}
+			fmt.Println("Packet count by protocol:")
+			for proto, cnt := range protoCounts {
+				fmt.Printf("%s: %d\n", proto, cnt)
+			}
+			fmt.Println("-------------------------")
+			statsMu.Unlock()
+		}
 	}()
 
 	// UI update loop
